@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 import argparse
 import csv
 import json
+import logging
 import requests
 import pandas
 import shutil
@@ -38,13 +39,13 @@ def parse_args():
     parser.add_argument('--output_file', required=True, help='CSV output file listing journal issue Preservation Network status.')
     return parser.parse_args()
 
-# Get the PKP OJS Preservation Network status file 
+# Get the PKP OJS Preservation Network status file
 # https://docs.pkp.sfu.ca/pkp-pn/en/#checking-status-on-pkp-pn-journal-list (January 2023)
 def download_file(tmp_file, url=PN_JOURNAL_LIST_STATUS, ):
     with requests.get(url, stream=True) as r:
         r.raise_for_status()
         tmp_file.write(r.text)
-        generated_date = r.text.partition('\n')[0].replace(',',' ') 
+        generated_date = r.text.partition('\n')[0].replace(',',' ')
         print(f"PN file date: {generated_date}")
         print("------------")
 
@@ -54,15 +55,15 @@ def get_relevant_pn_journal_info(journal_list):
     with tempfile.NamedTemporaryFile(mode="wt") as tmp_file:
         download_file(tmp_file, PN_JOURNAL_LIST_STATUS)
         # read the CSV from PN (without first line: "Generated,2022-12-15")
-        df = pandas.read_csv(tmp_file.name, skiprows=[0], low_memory=False)        
-        # filter larger PN Journal List 
+        df = pandas.read_csv(tmp_file.name, skiprows=[0], low_memory=False)
+        # filter larger PN Journal List
         df_filtered = df[df['Url'].isin(journal_list)]
         #df_filtered = df_filtered.astype(dtype={'Url':'string', 'Deposited':'string', 'Vol':'string', 'No':'string'})
-        # Todo: not sure if Pandas automatically assign a numeric datatype causes a problem; will explicitly set the datatype 
+        # Todo: not sure if Pandas automatically assign a numeric datatype causes a problem; will explicitly set the datatype
         df_filtered = df_filtered.astype(dtype={'Vol':'object', 'No':'object'})
     return df_filtered
 
-# 
+#
 def read_journal_list(journal_list_file):
     data = []
     with open(journal_list_file, "r") as f:
@@ -71,7 +72,7 @@ def read_journal_list(journal_list_file):
 
 # Start a session with a given OJS instance
 def ojs_session(url, username, password):
-    try: 
+    try:
         session = requests.Session()
 
         # first request: get CSRF token
@@ -90,16 +91,18 @@ def ojs_session(url, username, password):
         }
         headers = {'Content-Type': 'application/x-www-form-urlencoded'}
         response = session.post(tmp, data=data, headers=headers)
-        response.raise_for_status()
+        response.raise_for_status() # HTTP status for OJS 3 is 200 even if password fails
     except requests.exceptions.HTTPError as error:
-        print(response.content)
-
-    return session
+        logging.warning(response.content, exc_info=False)
+        session.close()
+        session = None
+    finally:
+        return session
 
 # filter the PN journal list to find corresponding OJS journal issue and if not found then not OJS journal issue not preserved
 def filter_pn_journal_list(url, issue, pn_df):
     # Sometimes the volume or number are blank, represented as "None" in the JSON datastructure import from the OJS API
-    # The 'None" value fails to match an empty cell value in the Pandas dataframe when filtering PN network journal list 
+    # The 'None" value fails to match an empty cell value in the Pandas dataframe when filtering PN network journal list
     # thus resulting in the following the ugly if/else loop
     # Todo: learn a better approach to filter Pandas
     date_published = issue['datePublished'][:10] # only the YYYY-MM-DD; sometimes the OJS /issue api returns date and time
@@ -120,7 +123,7 @@ def filter_pn_journal_list(url, issue, pn_df):
             (pn_df['Vol'] == issue['volume']) &
             (pn_df['Published'] == date_published)
             ]
-    else: 
+    else:
         pn_status = pn_df.loc[
             (pn_df['Url'] == url) &
             (pn_df['Vol'] == issue['volume']) &
@@ -142,14 +145,14 @@ def process_issue_list(journal_issues, pn_df, url, pn_status_csv):
         # lookup jounal issue in PN status report
         # Note: title is not always available via the OJS API
         # Note: the Url + Vol + No should produce a unique row in the OJS PKP PN status rows
-        #print(f"Checking Vol. {issue['volume']} No. {issue['number']} - Title: {issue['identification']} - (OJS issue id: {issue['id']})")  
-        #print(pn_df.dtypes)
+        logging.info(f"Checking Vol. {issue['volume']} No. {issue['number']} - Title: {issue['identification']} - (OJS issue id: {issue['id']})")
+        logging.debug(pn_df.dtypes)
         pn_status = pandas.DataFrame()
         # ignore if no published date
         if (issue['datePublished'] != None):
             pn_status = filter_pn_journal_list(url, issue, pn_df)
         if pn_status.empty:
-            #print(f"Status: not found in OJS PKP PN")
+            logging.debug(f"Status: not found in OJS PKP PN")
             status_dict = {
                 'Journal Url': url,
                 'Issue OJS ID': issue['id'],
@@ -162,11 +165,11 @@ def process_issue_list(journal_issues, pn_df, url, pn_status_csv):
         else:
             if pn_status.count()[0] > 1:
                 # sometimes the PN status file has multiple rows for the same volume number
-                print(
+                logging.warning(
                     f"Warning: multiple PN status records - this should not happen - url {url} issue id:{issue['id']} vol: {issue['volume']} no: {issue['number']} deposited: {pn_status['Deposited'].values[0]}"
                     )
                 pn_status = pn_status.sort_values(by=['Deposited'], ascending=[False])
-            #print(f"Status: OJS PKP PN Deposited: {pn_status['Deposited'].values[0]}")
+            logging.info(f"Status: OJS PKP PN Deposited: {pn_status['Deposited'].values[0]}")
             status_dict = {
                 'Journal Url': url,
                 'Issue OJS ID': issue['id'],
@@ -193,48 +196,50 @@ def get_journal_issues(session, base_url, res_count, res_offset):
         # https://mrujs.mtroyal.ca/index.php/bsuj, issueId: 11, Vol. 2 No. 1 (2014): appears was published, preserved and then unpublished?
         # payload = { "count": res_count, "offset": res_offset, "isPublished": "true" }
         payload = { "count": res_count, "offset": res_offset }
-        response = session.get(url, params=payload) 
+        response = session.get(url, params=payload)
         response.raise_for_status()
         ret = json.loads(response.text)
     except requests.exceptions.HTTPError as error:
         print(url)
-        print(response.content)
-        ret = None 
-    
-    return ret 
+        logging.exception(response.content, exc_info=False)
+        ret = None
+    finally:
+        return ret
 
 #
 def process(args, username, password, pn_status_csv):
     journal_list = read_journal_list(args.journal_list)
-    #print(journal_list)
+    logging.debug(journal_list)
     print("------------")
 
     pn_df = get_relevant_pn_journal_info(journal_list)
-    #print(pn_df)
+    logging.debug(pn_df)
 
     for i in journal_list:
         print(f"Journal URL: {i}")
         session = ojs_session(i, username, password)
+        if (session == None):
+            break;
 
         try:
             res_count = 20
             res_offset = 0
             while True:
                 journal_issues = get_journal_issues(session, i, res_count, res_offset)
-                
+
                 if journal_issues is None:
-                    break 
+                    break
 
                 process_issue_list(journal_issues, pn_df, i, pn_status_csv)
 
-                #print(f"itemsMax: {journal_issues['itemsMax']} res_offset: {res_offset} count: {res_count}" )
+                logging.info(f"itemsMax: {journal_issues['itemsMax']} res_offset: {res_offset} count: {res_count}" )
                 if journal_issues["itemsMax"] <= (res_count + res_offset):
                     break;
                 else:
                     res_offset = res_offset + res_count
 
         except Exception as e:
-            print(e)
+            logging.exception("Failed to match OJS journal issue to PN row")
         finally:
             session.close()
 
@@ -246,6 +251,10 @@ def process(args, username, password, pn_status_csv):
 #
 def main():
     args = parse_args()
+
+    # Todo: allow setting via the CLI or config file
+    #logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.WARNING)
 
     username = input('Username:')
     password = getpass('Password:')
@@ -270,4 +279,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()   
+    main()
