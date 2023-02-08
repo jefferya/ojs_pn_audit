@@ -68,7 +68,6 @@ def get_journal_issue_articles(session, base_url, res_count, res_offset, issue_i
         print(f" Error: {url}")
         print(response.content)
         ret = None 
-    
     return ret 
 
 def export_article(session, base_url, article_id):
@@ -76,19 +75,28 @@ def export_article(session, base_url, article_id):
         url = base_url.strip('/') + "/management/importexport/plugin/NativeImportExportPlugin/exportSubmissions"
         payload = { "selectedSubmissions": article_id}
         response = session.post(url, params=payload) 
-        print(response.headers)
+        # print(response.headers)
         response.raise_for_status()
+        # if the reponse is not XML (what the export should produce) then throw error and
+        if (response.headers['Content-Type'] != 'text/xml;charset=UTF-8'):
+            raise requests.exceptions.HTTPError('invalid return')
         print(f"articleId: {article_id} - ok")
     except requests.exceptions.HTTPError as error:
         print(f" Error: {url}")
         print(f"articleId: {article_id} - ERROR")
-        print(response.content)
+        soup = BeautifulSoup(response.text, "lxml")
+        for para in soup.findAll('p'):
+            if para.parent.name != 'pre':
+                print(f"{para}")
+        #print(response.content)
+        #print(response.content)
         ret = None 
     
 #
 def process_article_list(session, args, article_list):
     for article in article_list["items"]:
         export_article(session, args.journal_url, article['id'])
+        time.sleep(1) # allow server to rest
 
 #
 def process(args, username, password):
@@ -118,8 +126,6 @@ def process(args, username, password):
         finally:
             session.close()
 
-        # sleep between journals to reduce server load
-        time.sleep(5)
         print("------------")
 
 #
