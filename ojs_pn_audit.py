@@ -59,8 +59,10 @@ def get_relevant_pn_journal_info(journal_list):
         # filter larger PN Journal List
         df_filtered = df[df['Url'].isin(journal_list)]
         #df_filtered = df_filtered.astype(dtype={'Url':'string', 'Deposited':'string', 'Vol':'string', 'No':'string'})
-        # Todo: not sure if Pandas automatically assign a numeric datatype causes a problem; will explicitly set the datatype
+        # Todo: not sure if Pandas automatically assigns a numeric datatype causes a problem; will explicitly set the datatype
+        #df_filtered = df_filtered.astype(dtype={'Vol':'string', 'No':'string'})
         df_filtered = df_filtered.astype(dtype={'Vol':'object', 'No':'object'})
+        #print(df_filtered.dtypes)
     return df_filtered
 
 #
@@ -76,12 +78,14 @@ def ojs_session(url, username, password):
         session = requests.Session()
 
         # first request: get CSRF token
+        # OJS 3.3: this may change in future versions
         tmp = url.strip('/') + "/login"
         response = session.get(tmp)
         soup = BeautifulSoup(response.text, "lxml")
         csrf_token = soup.find('input', {'name':'csrfToken'})['value']
 
         # sencond request: signIn and load cookie into session
+        # OJS 3.3: this may change in future versions
         tmp = url.strip('/') + "/login/signIn"
         data = {
             "csrfToken": csrf_token,
@@ -107,17 +111,20 @@ def filter_pn_journal_list(url, issue, pn_df):
     # Todo: learn a better approach to filter Pandas
     date_published = issue['datePublished'][:10] # only the YYYY-MM-DD; sometimes the OJS /issue api returns date and time
     if (issue["volume"] == None and issue["number"] == None):
+        # exclude issue nummber and volume if none specified
         pn_status = pn_df.loc[
             (pn_df['Url'] == url) &
             (pn_df['Published'] == date_published)
             ]
     elif (issue["volume"] == None):
+        # exclude issue volume if none specified
         pn_status = pn_df.loc[
             (pn_df['Url'] == url) &
             (pn_df['No'] == issue['number']) &
             (pn_df['Published'] == date_published)
             ]
     elif (issue["number"] == None):
+        # exclude issue number if none specified
         pn_status = pn_df.loc[
             (pn_df['Url'] == url) &
             (pn_df['Vol'] == issue['volume']) &
@@ -128,6 +135,25 @@ def filter_pn_journal_list(url, issue, pn_df):
             (pn_df['Url'] == url) &
             (pn_df['Vol'] == issue['volume']) &
             (pn_df['No'] == issue['number']) &
+            (pn_df['Published'] == date_published)
+            ]
+    # if the first lookup fails, try again using the following workaround
+    # OJS 3.3: API for issue metadata sometimes returns "0" whereas PN journal list and OJS XML Export is "blank"
+    # for issue volume
+    # Todo: remove if elif block once API and OJS XML Export match output when volume is left blank
+    if (pn_status.empty and str(issue['volume']) == "0" and issue['number'] == None):
+        logging.info(f"OJS 3.3 issue API reponse volume = 0; workaround active to check PN list is null {url} {date_published}")
+        pn_status = pn_df.loc[
+            (pn_df['Url'] == url) &
+            (pandas.isnull(pn_df['Vol'])) &
+            (pn_df['Published'] == date_published)
+            ]
+    elif (pn_status.empty and str(issue['volume']) == "0"):
+        logging.info(f"OJS 3.3 issue API reponse volume = 0; workaround active to check PN list is null {url} {issue['number']} {date_published}")
+        pn_status = pn_df.loc[
+            (pn_df['Url'] == url) &
+            (pandas.isnull(pn_df['Vol'])) &
+            (pn_df['No'] == str(issue['number'])) &
             (pn_df['Published'] == date_published)
             ]
     return pn_status
@@ -244,7 +270,7 @@ def process(args, username, password, pn_status_csv):
             session.close()
 
         # sleep between journals to reduce server load
-        time.sleep(5)
+        time.sleep(1)
         print("------------")
 
 
